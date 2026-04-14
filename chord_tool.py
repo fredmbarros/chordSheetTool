@@ -17,18 +17,38 @@ except ImportError:
 #   ,:  repeat-open barline      ->  |:
 #   :,  repeat-close barline     ->  :|
 #   ;   final double barline     ->  ||
-#   [n] ending number            ->  (n) flush against barline
+#   [n] ending number            ->  digit only, black-box styled
+#   {text}                       ->  inline annotation, rendered as text
 
 def normalise_chords(raw):
     return ' '.join(raw.split())
 
 
 def tokenise(line):
-    s = line.replace('[', '(').replace(']', ')')
+    """
+    Returns a list of tokens, each either:
+      - a measure dict: { 'type': 'measure', 'chords', 'ending', 'left_deco', 'right_deco' }
+      - an annotation:  { 'type': 'annotation', 'text' }
+    """
+    # First, extract any {text} annotations and replace them with a placeholder
+    # so the chord tokeniser doesn't see the braces.
+    annotations = {}
+    placeholder_tmpl = '\x00ANN{}\x00'
+
+    def stash_annotation(m):
+        idx = len(annotations)
+        key = placeholder_tmpl.format(idx)
+        annotations[key] = m.group(1).strip()
+        return key
+
+    line_subst = re.sub(r'\{([^}]*)\}', stash_annotation, line)
+
+    # Now tokenise the chord content as before
+    s = line_subst.replace('[', '(').replace(']', ')')
     SEP = re.compile(r'(,:|:,|,|;)')
     parts = SEP.split(s)
 
-    measures = []
+    tokens = []
     pending_left = ''
 
     i = 0
@@ -48,24 +68,104 @@ def tokenise(line):
         else:
             right_deco, next_left = '', ''
 
-        chords = normalise_chords(chunk)
+        # A chunk may contain annotation placeholders mixed with chords.
+        # Split the chunk on placeholders and emit annotation + measure tokens.
+        sub_parts = re.split(r'(\x00ANN\d+\x00)', chunk)
+
+        chord_accumulator = ''
+        for sp in sub_parts:
+            if sp in annotations:
+                # Flush any accumulated chord content as a measure first
+                chords = normalise_chords(chord_accumulator)
+                chord_accumulator = ''
+                if chords:
+                    ending_match = re.match(r'^\((\d+)\)\s*(.*)', chords)
+                    if ending_match:
+                        ending = ending_match.group(1)
+                        chords = ending_match.group(2)
+                    else:
+                        ending = ''
+                    tokens.append({
+                        'type':       'measure',
+                        'chords':     chords,
+                        'ending':     ending,
+                        'left_deco':  pending_left,
+                        'right_deco': '',   # right_deco applied to last measure below
+                    })
+                    pending_left = ''
+                # Emit the annotation
+                tokens.append({'type': 'annotation', 'text': annotations[sp]})
+            else:
+                chord_accumulator += sp
+
+        # Flush remaining chord content with the separator's right_deco
+        chords = normalise_chords(chord_accumulator)
         if chords:
             ending_match = re.match(r'^\((\d+)\)\s*(.*)', chords)
             if ending_match:
-                ending = ending_match.group(1)   # just the digit(s), no parens
+                ending = ending_match.group(1)
                 chords = ending_match.group(2)
             else:
                 ending = ''
-            measures.append({
+            tokens.append({
+                'type':       'measure',
                 'chords':     chords,
                 'ending':     ending,
                 'left_deco':  pending_left,
                 'right_deco': right_deco,
             })
+        elif right_deco:
+            # Separator with no chord content after it (e.g. trailing ;)
+            # attach right_deco to the last measure token if there is one
+            for t in reversed(tokens):
+                if t['type'] == 'measure':
+                    t['right_deco'] = right_deco
+                    break
 
         pending_left = next_left
 
-    return measures
+    return tokens
+
+
+# ---------------------------------------------------------------------------
+# METADATA / SONG SPLITTING
+# ---------------------------------------------------------------------------
+
+def split_songs(content):
+    lines = content.splitlines()
+    delimiters = [i for i, l in enumerate(lines) if l.strip() == '---']
+
+    if not delimiters:
+        return [('', content.strip())]
+
+    songs = []
+    i = 0
+    while i < len(delimiters):
+        meta_open  = delimiters[i]
+        meta_close = delimiters[i + 1] if i + 1 < len(delimiters) else None
+
+        if meta_close is None:
+            chord_lines = lines[meta_open + 1:]
+            songs.append(('', '\n'.join(chord_lines).strip()))
+            break
+
+        meta_body = '\n'.join(lines[meta_open + 1:meta_close])
+        next_meta_open = delimiters[i + 2] if i + 2 < len(delimiters) else len(lines)
+        chord_body = '\n'.join(lines[meta_close + 1:next_meta_open])
+
+        songs.append((meta_body.strip(), chord_body.strip()))
+        i += 2
+
+    return songs
+
+
+def parse_meta(meta_body):
+    meta = {}
+    for line in meta_body.splitlines():
+        if ':' in line:
+            key, _, val = line.partition(':')
+            meta[key.strip().lower()] = val.strip()
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -74,80 +174,137 @@ def tokenise(line):
 
 def generate_cho(content):
     chord_pat = r'\b([A-G][b#]?(m|maj|min|aug|dim|sus|o)?\d?(/[A-G][b#]?)?)\b'
-    lines = content.strip().split('\n')
-    output = ['{title: Chord Sheet}', '{type: chords}', '']
+    songs = split_songs(content)
+    output_parts = []
 
-    for line in lines:
-        if not line.strip():
-            output.append('')
-            continue
+    for meta_body, chord_text in songs:
+        meta = parse_meta(meta_body)
+        title = meta.get('title', 'Chord Sheet')
+        lines_out = ['{title: ' + title + '}', '{type: chords}', '']
 
-        measures = tokenise(line)
-        parts = []
-        for m in measures:
-            left  = '|:' if m['left_deco'] == ':' else '|'
-            right = (' :|' if m['right_deco'] == ':' else
-                     (' ||' if m['right_deco'] == '||' else ''))
-            ending = m.get('ending', '')
-            chords = re.sub(chord_pat, r'[\1]', m['chords'])
-            parts.append(f"{left}{ending} {chords}{right}" if ending else f"{left} {chords}{right}")
+        for line in chord_text.splitlines():
+            if not line.strip():
+                lines_out.append('')
+                continue
+            tokens = tokenise(line)
+            parts = []
+            for t in tokens:
+                if t['type'] == 'annotation':
+                    parts.append('# ' + t['text'])
+                else:
+                    left  = '|:' if t['left_deco'] == ':' else '|'
+                    right = (' :|' if t['right_deco'] == ':' else
+                             (' ||' if t['right_deco'] == '||' else ''))
+                    ending = t.get('ending', '')
+                    chords = re.sub(chord_pat, r'[\1]', t['chords'])
+                    parts.append(f"{left}{ending} {chords}{right}" if ending
+                                 else f"{left} {chords}{right}")
+            lines_out.append(' '.join(parts))
 
-        output.append(' '.join(parts))
+        output_parts.append('\n'.join(lines_out))
 
-    return '\n'.join(output)
+    return '\n\n'.join(output_parts)
 
 
 # ---------------------------------------------------------------------------
-# HTML OUTPUT
+# HTML RENDERING
 # ---------------------------------------------------------------------------
-# Classes emitted:
-#   .sheet              outermost container
-#   .section            one source line (paragraph break on Enter)
-#   .measure            one bar; never breaks internally
-#   .measure.repeat-open    |:
-#   .measure.repeat-close   :|
-#   .measure.final          ||
-#   .dots-left          the two stacked dots for |: (real HTML, not CSS content)
-#   .dots-right         the two stacked dots for :|
-#   .ending             the (1) / (2) number inside a measure
-#   .chord              each individual chord symbol
 
 CHORD_PAT = re.compile(
     r'\b([A-G][b#]?(m|maj|min|aug|dim|sus|o)?\d?(/[A-G][b#]?)?)\b'
 )
 
-# Two stacked middle-dots as real HTML — avoids all CSS content escape issues
 DOTS = '<span class="dots">:</span>'
+
 
 def chords_to_spans(text):
     return CHORD_PAT.sub(r'<span class="chord">\1</span>', text)
 
-def measure_to_html(m):
+
+def measure_to_html(t):
     classes = ['measure']
-    if m['left_deco'] == ':':
+    if t['left_deco'] == ':':
         classes.append('repeat-open')
-    if m['right_deco'] == ':':
+    if t['right_deco'] == ':':
         classes.append('repeat-close')
-    if m['right_deco'] == '||':
+    if t['right_deco'] == '||':
         classes.append('final')
 
-    left_dots  = DOTS if m['left_deco'] == ':' else ''
-    right_dots = DOTS if m['right_deco'] == ':' else ''
-    ending_html = '<span class="ending">' + m['ending'] + '</span>' if m['ending'] else ''
-    chords_html = chords_to_spans(m['chords'])
+    left_dots   = DOTS if t['left_deco'] == ':' else ''
+    right_dots  = DOTS if t['right_deco'] == ':' else ''
+    ending_html = ('<span class="ending">' + t['ending'] + '</span>'
+                   if t['ending'] else '')
+    chords_html = chords_to_spans(t['chords'])
 
     return ('<span class="' + ' '.join(classes) + '">'
             + left_dots + ending_html + chords_html + right_dots
             + '</span>')
 
 
+def line_to_html(tokens):
+    """Convert a list of tokens (one source line) to HTML."""
+    # Check if the entire line is a single annotation with no measures
+    if len(tokens) == 1 and tokens[0]['type'] == 'annotation':
+        return '<div class="annotation">' + tokens[0]['text'] + '</div>'
+
+    # Mixed line or pure chord line — wrap in a section div
+    inner = ''
+    for t in tokens:
+        if t['type'] == 'annotation':
+            inner += '<span class="annotation">' + t['text'] + '</span>'
+        else:
+            inner += measure_to_html(t)
+    return '<div class="section">' + inner + '</div>'
+
+
+def song_to_html(meta, chord_text):
+    html = '<div class="song">\n'
+
+    if meta.get('title'):
+        html += '<h2 class="song-title">' + meta['title'] + '</h2>\n'
+
+    meta_fields = []
+    for key in ('artist', 'key', 'time'):
+        if meta.get(key):
+            meta_fields.append(
+                '<span class="meta-field">'
+                '<span class="meta-label">' + key.capitalize() + ':</span> '
+                + meta[key] + '</span>'
+            )
+    for key, val in meta.items():
+        if key not in ('title', 'artist', 'key', 'time'):
+            meta_fields.append(
+                '<span class="meta-field">'
+                '<span class="meta-label">' + key.capitalize() + ':</span> '
+                + val + '</span>'
+            )
+    if meta_fields:
+        html += ('<div class="song-meta">'
+                 + ' &nbsp; '.join(meta_fields)
+                 + '</div>\n')
+
+    for line in chord_text.splitlines():
+        if not line.strip():
+            html += '<div class="spacer"></div>\n'
+            continue
+        tokens = tokenise(line)
+        html += line_to_html(tokens) + '\n'
+
+    html += '</div>\n'
+    return html
+
+
 # ---------------------------------------------------------------------------
-# CSS  — edit this block to restyle the output
+# CSS
 # ---------------------------------------------------------------------------
 CSS = """
 /* -------------------------------------------------------
    Selectors:
      .sheet              outermost wrapper
+     .song               one song block
+     .song-title         song title (centered)
+     .song-meta          metadata line (artist, key, time ...)
+     .meta-label         the "Key:" / "Time:" label
      .section            one line of music
      .spacer             blank-line gap between sections
      .measure            one bar (inline-block, never breaks)
@@ -157,6 +314,7 @@ CSS = """
      .dots               repeat colon sitting inside the barline
      .ending             volta number e.g. 1  2
      .chord              individual chord symbol
+     .annotation         {text} rendered inline or as its own line
 ------------------------------------------------------- */
 
 @page { size: A4; margin: 25mm; }
@@ -168,6 +326,25 @@ body {
 
 .sheet {
   /* outermost wrapper */
+}
+
+.song {
+  margin-bottom: 2em;
+}
+
+.song-title {
+  text-align: center;
+  font-size: 20pt;
+  margin: 0 0 0.5em 0;
+}
+
+.song-meta {
+  font-size: 10pt;
+  margin-bottom: 1em;
+}
+
+.meta-label {
+  font-weight: bold;
 }
 
 .section {
@@ -200,14 +377,6 @@ body {
 }
 
 /* ---- repeat colon ---- */
-/* .dots is a simple ":" sitting just inside the barline.
-   It is absolutely positioned so you can move it
-   independently of the chord content.
-   - "left" / "right" controls its distance from the barline.
-   - "font-size" controls its size.
-   The chord spacing is controlled purely by the
-   padding-left / padding-right of .measure.repeat-open/close. */
-
 .dots {
   position: absolute;
   top: 50%;
@@ -217,16 +386,11 @@ body {
   line-height: 1;
 }
 
-.measure.repeat-open .dots  { left: -1pt; }   /* distance from left barline */
-.measure.repeat-close .dots { right: -1pt; }  /* distance from right barline */
+.measure.repeat-open .dots  { left: -1pt; }
+.measure.repeat-close .dots { right: -1pt; }
 
-.measure.repeat-open {
-  padding-left: 20pt;   /* push chord away from barline+colon */
-}
-
-.measure.repeat-close {
-  padding-right: 20pt;  /* push chord away from barline+colon */
-}
+.measure.repeat-open  { padding-left:  20pt; }
+.measure.repeat-close { padding-right: 20pt; }
 
 /* ---- final double barline ---- */
 .measure.final {
@@ -249,22 +413,36 @@ body {
 .chord {
   color: black;
 }
+
+/* ---- text annotation {like this} ---- */
+/* As a standalone line it renders as a block; inline it sits between measures */
+div.annotation {
+  font-family: Helvetica, Arial, sans-serif;
+  font-size: 14pt;
+  font-style: italic;
+  margin-bottom: 0.5em;
+}
+
+span.annotation {
+  font-family: Helvetica, Arial, sans-serif;
+  font-size: 14pt;
+  font-style: italic;
+  vertical-align: top;
+  margin: 0 6pt;
+  position: relative;
+  top: 3pt;
+}
 """
 
 
 def generate_html(content, standalone=True):
-    lines = content.strip().split('\n')
-    sections = []
+    songs = split_songs(content)
+    fragments = []
+    for meta_body, chord_text in songs:
+        meta = parse_meta(meta_body)
+        fragments.append(song_to_html(meta, chord_text))
 
-    for line in lines:
-        if not line.strip():
-            sections.append('<div class="spacer"></div>')
-            continue
-        measures = tokenise(line)
-        inner = ''.join(measure_to_html(m) for m in measures)
-        sections.append('<div class="section">' + inner + '</div>')
-
-    body = '\n'.join(sections)
+    body = '\n'.join(fragments)
 
     if not standalone:
         return body
@@ -296,7 +474,54 @@ def generate_pdf(content, output_path):
         return
     html = generate_html(content, standalone=True)
     WeasyprintHTML(string=html).write_pdf(output_path)
-    print(f"Created {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# SINGLE FILE PROCESSING
+# ---------------------------------------------------------------------------
+
+def process_file(input_path, fmt, output_path=None):
+    with open(input_path, 'r') as fh:
+        content = fh.read()
+
+    out = output_path or (input_path.rsplit('.', 1)[0] + '.' + fmt)
+
+    if fmt == 'cho':
+        result = generate_cho(content)
+        with open(out, 'w') as fh:
+            fh.write(result)
+    elif fmt == 'html':
+        result = generate_html(content, standalone=True)
+        with open(out, 'w') as fh:
+            fh.write(result)
+    elif fmt == 'pdf':
+        generate_pdf(content, out)
+
+    print(f"Created {out}")
+
+
+# ---------------------------------------------------------------------------
+# BATCH PROCESSING
+# ---------------------------------------------------------------------------
+
+def process_folder(folder_path, fmt):
+    subfolder = {'pdf': 'PDFs', 'html': 'HTMLs', 'cho': 'CHOs'}.get(fmt, fmt.upper() + 's')
+    out_dir = os.path.join(folder_path, subfolder)
+    os.makedirs(out_dir, exist_ok=True)
+
+    txt_files = sorted(f for f in os.listdir(folder_path) if f.lower().endswith('.txt'))
+
+    if not txt_files:
+        print(f"No .txt files found in {folder_path}")
+        return
+
+    for fname in txt_files:
+        input_path = os.path.join(folder_path, fname)
+        out_name   = os.path.splitext(fname)[0] + '.' + fmt
+        out_path   = os.path.join(out_dir, out_name)
+        process_file(input_path, fmt, out_path)
+
+    print(f"\nDone. {len(txt_files)} file(s) written to {out_dir}/")
 
 
 # ---------------------------------------------------------------------------
@@ -306,29 +531,26 @@ def generate_pdf(content, output_path):
 def main():
     parser = argparse.ArgumentParser(
         description='Convert chord shorthand (.txt) to .cho / .html / .pdf')
-    parser.add_argument('input', help='Source .txt file')
+    parser.add_argument('input',
+                        help='Source .txt file, or folder path with --batch')
     parser.add_argument('-f', '--format', choices=['cho', 'html', 'pdf'],
-                        default='cho', help='Output format (default: cho)')
-    parser.add_argument('-o', '--output', help='Output filename')
+                        default='html', help='Output format (default: html)')
+    parser.add_argument('-o', '--output',
+                        help='Output filename (single-file mode only)')
+    parser.add_argument('-b', '--batch', action='store_true',
+                        help='Batch-convert all .txt files in the given folder')
     args = parser.parse_args()
 
-    with open(args.input, 'r') as fh:
-        content = fh.read()
-
-    out = args.output or (args.input.rsplit('.', 1)[0] + f'.{args.format}')
-
-    if args.format == 'cho':
-        result = generate_cho(content)
-        with open(out, 'w') as fh:
-            fh.write(result)
-        print(f"Created {out}")
-    elif args.format == 'html':
-        result = generate_html(content, standalone=True)
-        with open(out, 'w') as fh:
-            fh.write(result)
-        print(f"Created {out}")
+    if args.batch:
+        if not os.path.isdir(args.input):
+            print(f"Error: '{args.input}' is not a directory.")
+            return
+        process_folder(args.input, args.format)
     else:
-        generate_pdf(content, out)
+        if not os.path.isfile(args.input):
+            print(f"Error: '{args.input}' not found.")
+            return
+        process_file(args.input, args.format, args.output)
 
 
 if __name__ == '__main__':
