@@ -1,0 +1,9 @@
+---
+title: Vem Morena
+artist: Luiz Gonzaga
+key: Em
+---
+
+,: Em , A :,
+,: Em , B7 :,
+,: Em , A :, F#7 B7 , Em , % , %. ;
