@@ -1,5 +1,6 @@
 import re
 import argparse
+import os
 
 try:
     from weasyprint import HTML as WeasyprintHTML
