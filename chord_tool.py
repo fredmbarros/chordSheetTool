@@ -19,6 +19,7 @@ except ImportError:
 #   ;   final double barline     ->  ||
 #   [n] ending number            ->  digit only, black-box styled
 #   {text}                       ->  inline annotation, rendered as text
+#   ===  (own line)              ->  page break
 
 def normalise_chords(raw):
     return ' '.join(raw.split())
@@ -30,8 +31,6 @@ def tokenise(line):
       - a measure dict: { 'type': 'measure', 'chords', 'ending', 'left_deco', 'right_deco' }
       - an annotation:  { 'type': 'annotation', 'text' }
     """
-    # First, extract any {text} annotations and replace them with a placeholder
-    # so the chord tokeniser doesn't see the braces.
     annotations = {}
     placeholder_tmpl = '\x00ANN{}\x00'
 
@@ -43,7 +42,6 @@ def tokenise(line):
 
     line_subst = re.sub(r'\{([^}]*)\}', stash_annotation, line)
 
-    # Now tokenise the chord content as before
     s = line_subst.replace('[', '(').replace(']', ')')
     SEP = re.compile(r'(,:|:,|,|;)')
     parts = SEP.split(s)
@@ -68,14 +66,11 @@ def tokenise(line):
         else:
             right_deco, next_left = '', ''
 
-        # A chunk may contain annotation placeholders mixed with chords.
-        # Split the chunk on placeholders and emit annotation + measure tokens.
         sub_parts = re.split(r'(\x00ANN\d+\x00)', chunk)
 
         chord_accumulator = ''
         for sp in sub_parts:
             if sp in annotations:
-                # Flush any accumulated chord content as a measure first
                 chords = normalise_chords(chord_accumulator)
                 chord_accumulator = ''
                 if chords:
@@ -90,15 +85,13 @@ def tokenise(line):
                         'chords':     chords,
                         'ending':     ending,
                         'left_deco':  pending_left,
-                        'right_deco': '',   # right_deco applied to last measure below
+                        'right_deco': '',
                     })
                     pending_left = ''
-                # Emit the annotation
                 tokens.append({'type': 'annotation', 'text': annotations[sp]})
             else:
                 chord_accumulator += sp
 
-        # Flush remaining chord content with the separator's right_deco
         chords = normalise_chords(chord_accumulator)
         if chords:
             ending_match = re.match(r'^\((\d+)\)\s*(.*)', chords)
@@ -115,8 +108,6 @@ def tokenise(line):
                 'right_deco': right_deco,
             })
         elif right_deco:
-            # Separator with no chord content after it (e.g. trailing ;)
-            # attach right_deco to the last measure token if there is one
             for t in reversed(tokens):
                 if t['type'] == 'measure':
                     t['right_deco'] = right_deco
@@ -186,6 +177,9 @@ def generate_cho(content):
             if not line.strip():
                 lines_out.append('')
                 continue
+            if line.strip() == '===':
+                lines_out.append('')   # no real equivalent in cho, just blank line
+                continue
             tokens = tokenise(line)
             parts = []
             for t in tokens:
@@ -242,12 +236,9 @@ def measure_to_html(t):
 
 
 def line_to_html(tokens):
-    """Convert a list of tokens (one source line) to HTML."""
-    # Check if the entire line is a single annotation with no measures
     if len(tokens) == 1 and tokens[0]['type'] == 'annotation':
         return '<div class="annotation">' + tokens[0]['text'] + '</div>'
 
-    # Mixed line or pure chord line — wrap in a section div
     inner = ''
     for t in tokens:
         if t['type'] == 'annotation':
@@ -287,6 +278,9 @@ def song_to_html(meta, chord_text):
         if not line.strip():
             html += '<div class="spacer"></div>\n'
             continue
+        if line.strip() == '===':
+            html += '<div class="page-break"></div>\n'
+            continue
         tokens = tokenise(line)
         html += line_to_html(tokens) + '\n'
 
@@ -307,6 +301,7 @@ CSS = """
      .meta-label         the "Key:" / "Time:" label
      .section            one line of music
      .spacer             blank-line gap between sections
+     .page-break         forces a new page (=== in source)
      .measure            one bar (inline-block, never breaks)
      .measure.repeat-open    left side is |:
      .measure.repeat-close   right side is :|
@@ -353,6 +348,12 @@ body {
 
 .spacer {
   /* height: 36pt; */
+}
+
+/* ---- page break ---- */
+.page-break {
+  page-break-after: always;
+  break-after: page;
 }
 
 /* ---- each measure is an unbreakable inline block ---- */
@@ -415,7 +416,6 @@ body {
 }
 
 /* ---- text annotation {like this} ---- */
-/* As a standalone line it renders as a block; inline it sits between measures */
 div.annotation {
   font-family: Helvetica, Arial, sans-serif;
   font-size: 14pt;
