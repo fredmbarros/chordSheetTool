@@ -18,17 +18,37 @@ except ImportError:
 #   :,  repeat-close barline     ->  :|
 #   ;   final double barline     ->  ||
 #   [n] ending number            ->  digit only, black-box styled
+#   {text}                       ->  inline annotation, rendered as text
 
 def normalise_chords(raw):
     return ' '.join(raw.split())
 
 
 def tokenise(line):
-    s = line.replace('[', '(').replace(']', ')')
+    """
+    Returns a list of tokens, each either:
+      - a measure dict: { 'type': 'measure', 'chords', 'ending', 'left_deco', 'right_deco' }
+      - an annotation:  { 'type': 'annotation', 'text' }
+    """
+    # First, extract any {text} annotations and replace them with a placeholder
+    # so the chord tokeniser doesn't see the braces.
+    annotations = {}
+    placeholder_tmpl = '\x00ANN{}\x00'
+
+    def stash_annotation(m):
+        idx = len(annotations)
+        key = placeholder_tmpl.format(idx)
+        annotations[key] = m.group(1).strip()
+        return key
+
+    line_subst = re.sub(r'\{([^}]*)\}', stash_annotation, line)
+
+    # Now tokenise the chord content as before
+    s = line_subst.replace('[', '(').replace(']', ')')
     SEP = re.compile(r'(,:|:,|,|;)')
     parts = SEP.split(s)
 
-    measures = []
+    tokens = []
     pending_left = ''
 
     i = 0
@@ -48,7 +68,38 @@ def tokenise(line):
         else:
             right_deco, next_left = '', ''
 
-        chords = normalise_chords(chunk)
+        # A chunk may contain annotation placeholders mixed with chords.
+        # Split the chunk on placeholders and emit annotation + measure tokens.
+        sub_parts = re.split(r'(\x00ANN\d+\x00)', chunk)
+
+        chord_accumulator = ''
+        for sp in sub_parts:
+            if sp in annotations:
+                # Flush any accumulated chord content as a measure first
+                chords = normalise_chords(chord_accumulator)
+                chord_accumulator = ''
+                if chords:
+                    ending_match = re.match(r'^\((\d+)\)\s*(.*)', chords)
+                    if ending_match:
+                        ending = ending_match.group(1)
+                        chords = ending_match.group(2)
+                    else:
+                        ending = ''
+                    tokens.append({
+                        'type':       'measure',
+                        'chords':     chords,
+                        'ending':     ending,
+                        'left_deco':  pending_left,
+                        'right_deco': '',   # right_deco applied to last measure below
+                    })
+                    pending_left = ''
+                # Emit the annotation
+                tokens.append({'type': 'annotation', 'text': annotations[sp]})
+            else:
+                chord_accumulator += sp
+
+        # Flush remaining chord content with the separator's right_deco
+        chords = normalise_chords(chord_accumulator)
         if chords:
             ending_match = re.match(r'^\((\d+)\)\s*(.*)', chords)
             if ending_match:
@@ -56,44 +107,31 @@ def tokenise(line):
                 chords = ending_match.group(2)
             else:
                 ending = ''
-            measures.append({
+            tokens.append({
+                'type':       'measure',
                 'chords':     chords,
                 'ending':     ending,
                 'left_deco':  pending_left,
                 'right_deco': right_deco,
             })
+        elif right_deco:
+            # Separator with no chord content after it (e.g. trailing ;)
+            # attach right_deco to the last measure token if there is one
+            for t in reversed(tokens):
+                if t['type'] == 'measure':
+                    t['right_deco'] = right_deco
+                    break
 
         pending_left = next_left
 
-    return measures
+    return tokens
 
 
 # ---------------------------------------------------------------------------
 # METADATA / SONG SPLITTING
 # ---------------------------------------------------------------------------
-# File format:
-#
-#   ---            <- opens metadata block
-#   title: My Song
-#   artist: Someone
-#   key: F
-#   time: 4/4
-#   ---            <- closes metadata block; chord lines follow
-#   A , E7 ,: A ...
-#   (blank line = section break inside song)
-#   ---            <- opens next song's metadata block
-#   title: Another Song
-#   ---
-#   D , G , D ;
-#
-# Files with no --- at all are treated as a single song with no metadata.
 
 def split_songs(content):
-    """
-    Returns a list of (meta_body_str, chord_body_str) tuples.
-    meta_body_str is the raw text between the --- delimiters (may be empty).
-    chord_body_str is the chord lines that follow.
-    """
     lines = content.splitlines()
     delimiters = [i for i, l in enumerate(lines) if l.strip() == '---']
 
@@ -148,16 +186,19 @@ def generate_cho(content):
             if not line.strip():
                 lines_out.append('')
                 continue
-            measures = tokenise(line)
+            tokens = tokenise(line)
             parts = []
-            for m in measures:
-                left  = '|:' if m['left_deco'] == ':' else '|'
-                right = (' :|' if m['right_deco'] == ':' else
-                         (' ||' if m['right_deco'] == '||' else ''))
-                ending = m.get('ending', '')
-                chords = re.sub(chord_pat, r'[\1]', m['chords'])
-                parts.append(f"{left}{ending} {chords}{right}" if ending
-                              else f"{left} {chords}{right}")
+            for t in tokens:
+                if t['type'] == 'annotation':
+                    parts.append('# ' + t['text'])
+                else:
+                    left  = '|:' if t['left_deco'] == ':' else '|'
+                    right = (' :|' if t['right_deco'] == ':' else
+                             (' ||' if t['right_deco'] == '||' else ''))
+                    ending = t.get('ending', '')
+                    chords = re.sub(chord_pat, r'[\1]', t['chords'])
+                    parts.append(f"{left}{ending} {chords}{right}" if ending
+                                 else f"{left} {chords}{right}")
             lines_out.append(' '.join(parts))
 
         output_parts.append('\n'.join(lines_out))
@@ -180,24 +221,40 @@ def chords_to_spans(text):
     return CHORD_PAT.sub(r'<span class="chord">\1</span>', text)
 
 
-def measure_to_html(m):
+def measure_to_html(t):
     classes = ['measure']
-    if m['left_deco'] == ':':
+    if t['left_deco'] == ':':
         classes.append('repeat-open')
-    if m['right_deco'] == ':':
+    if t['right_deco'] == ':':
         classes.append('repeat-close')
-    if m['right_deco'] == '||':
+    if t['right_deco'] == '||':
         classes.append('final')
 
-    left_dots   = DOTS if m['left_deco'] == ':' else ''
-    right_dots  = DOTS if m['right_deco'] == ':' else ''
-    ending_html = ('<span class="ending">' + m['ending'] + '</span>'
-                   if m['ending'] else '')
-    chords_html = chords_to_spans(m['chords'])
+    left_dots   = DOTS if t['left_deco'] == ':' else ''
+    right_dots  = DOTS if t['right_deco'] == ':' else ''
+    ending_html = ('<span class="ending">' + t['ending'] + '</span>'
+                   if t['ending'] else '')
+    chords_html = chords_to_spans(t['chords'])
 
     return ('<span class="' + ' '.join(classes) + '">'
             + left_dots + ending_html + chords_html + right_dots
             + '</span>')
+
+
+def line_to_html(tokens):
+    """Convert a list of tokens (one source line) to HTML."""
+    # Check if the entire line is a single annotation with no measures
+    if len(tokens) == 1 and tokens[0]['type'] == 'annotation':
+        return '<div class="annotation">' + tokens[0]['text'] + '</div>'
+
+    # Mixed line or pure chord line — wrap in a section div
+    inner = ''
+    for t in tokens:
+        if t['type'] == 'annotation':
+            inner += '<span class="annotation">' + t['text'] + '</span>'
+        else:
+            inner += measure_to_html(t)
+    return '<div class="section">' + inner + '</div>'
 
 
 def song_to_html(meta, chord_text):
@@ -206,7 +263,6 @@ def song_to_html(meta, chord_text):
     if meta.get('title'):
         html += '<h2 class="song-title">' + meta['title'] + '</h2>\n'
 
-    # Known fields in display order, then any extras the user added
     meta_fields = []
     for key in ('artist', 'key', 'time'):
         if meta.get(key):
@@ -231,9 +287,8 @@ def song_to_html(meta, chord_text):
         if not line.strip():
             html += '<div class="spacer"></div>\n'
             continue
-        measures = tokenise(line)
-        inner = ''.join(measure_to_html(m) for m in measures)
-        html += '<div class="section">' + inner + '</div>\n'
+        tokens = tokenise(line)
+        html += line_to_html(tokens) + '\n'
 
     html += '</div>\n'
     return html
@@ -259,6 +314,7 @@ CSS = """
      .dots               repeat colon sitting inside the barline
      .ending             volta number e.g. 1  2
      .chord              individual chord symbol
+     .annotation         {text} rendered inline or as its own line
 ------------------------------------------------------- */
 
 @page { size: A4; margin: 25mm; }
@@ -279,11 +335,11 @@ body {
 .song-title {
   text-align: center;
   font-size: 20pt;
-  margin: 0 0 0.3em 0;
+  margin: 0 0 0.5em 0;
 }
 
 .song-meta {
-  font-size: 11pt;
+  font-size: 10pt;
   margin-bottom: 1em;
 }
 
@@ -357,6 +413,25 @@ body {
 .chord {
   color: black;
 }
+
+/* ---- text annotation {like this} ---- */
+/* As a standalone line it renders as a block; inline it sits between measures */
+div.annotation {
+  font-family: Helvetica, Arial, sans-serif;
+  font-size: 14pt;
+  font-style: italic;
+  margin-bottom: 0.5em;
+}
+
+span.annotation {
+  font-family: Helvetica, Arial, sans-serif;
+  font-size: 14pt;
+  font-style: italic;
+  vertical-align: top;
+  margin: 0 6pt;
+  position: relative;
+  top: 3pt;
+}
 """
 
 
@@ -399,7 +474,6 @@ def generate_pdf(content, output_path):
         return
     html = generate_html(content, standalone=True)
     WeasyprintHTML(string=html).write_pdf(output_path)
-    print(f"Created {output_path}")
 
 
 # ---------------------------------------------------------------------------

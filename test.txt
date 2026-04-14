@@ -5,4 +5,4 @@ key: A
 time: 2/4
 ---
 A , E7 ,: A , A7 , D D#o ,[1] A , Bm E7 :,[2] A E7 , A ;
-C#7 , F#m7(9) F#7, Bm G#ø , D7 C#7 , Co G/B , F#m/A E7/G# ;
+C#7 , F#m7(9) F#7, Bm G#ø , D7 C#7 , Co G/B , F#m/A E7/G# ; {D.C.}
