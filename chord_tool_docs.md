@@ -1,6 +1,6 @@
 # chord_tool — Documentation
 
-A command-line interpreter that converts plain-text chord sheets into HTML or PDF files, with optional ChordPro (`.cho`) output for use with apps like Songbook Pro.
+A command-line interpreter that converts plain-text chord sheets into ChordPro, HTML, PDF, or plain text files.
 
 ---
 
@@ -48,22 +48,24 @@ python chord_tool.py <input> [options]
 ### Single file
 
 ```bash
-python chord_tool.py song.txt              # outputs song.html (default)
-python chord_tool.py song.txt -f html      # same as above, explicit
+python chord_tool.py song.txt              # outputs song.cho (default)
+python chord_tool.py song.txt -f cho       # same as above, explicit
+python chord_tool.py song.txt -f txt       # outputs song.txt (plain ASCII)
+python chord_tool.py song.txt -f html      # outputs song.html
 python chord_tool.py song.txt -f pdf       # outputs song.pdf
-python chord_tool.py song.txt -f cho       # outputs song.cho (ChordPro)
 python chord_tool.py song.txt -f pdf -o MySong.pdf   # custom output filename
 ```
 
 ### Batch mode (entire folder)
 
 ```bash
-python chord_tool.py /path/to/folder -b           # all .txt files → HTMLs/
+python chord_tool.py /path/to/folder -b           # all .txt files → CHOs/
+python chord_tool.py /path/to/folder -b -f txt    # all .txt files → TXTs/
+python chord_tool.py /path/to/folder -b -f html   # all .txt files → HTMLs/
 python chord_tool.py /path/to/folder -b -f pdf    # all .txt files → PDFs/
-python chord_tool.py /path/to/folder -b -f cho    # all .txt files → CHOs/
 ```
 
-Output files are placed in a subfolder named `HTMLs`, `PDFs`, or `CHOs` inside the source folder. The subfolder is created automatically if it doesn't exist.
+Output files are placed in a subfolder (`CHOs`, `TXTs`, `HTMLs`, or `PDFs`) inside the source folder. The subfolder is created automatically if it does not exist.
 
 ---
 
@@ -71,7 +73,7 @@ Output files are placed in a subfolder named `HTMLs`, `PDFs`, or `CHOs` inside t
 
 | Flag | Long form | Description |
 |------|-----------|-------------|
-| `-f` | `--format` | Output format: `html`, `pdf`, or `cho`. Default: `html` |
+| `-f` | `--format` | Output format: `cho`, `txt`, `html`, or `pdf`. Default: `cho` |
 | `-o` | `--output` | Custom output filename (single-file mode only) |
 | `-b` | `--batch`  | Batch mode: process all `.txt` files in the given folder |
 
@@ -79,14 +81,19 @@ Output files are placed in a subfolder named `HTMLs`, `PDFs`, or `CHOs` inside t
 
 ## Output formats
 
+### ChordPro (`-f cho`) — default
+Outputs a `.cho` file compatible with Songbook Pro and other ChordPro readers. Uses the `{start_of_grid}` / `{end_of_grid}` directives for chord-only layout. Metadata fields (`title`, `artist`, `key`, `time`) become proper ChordPro directives. Annotations become `{comment: }` directives.
+
+If a `time` signature is provided in the metadata (e.g. `time: 4/4`), each measure is padded with beat dots automatically — so a single chord in 4/4 becomes `| Am7 . . . |`, and two chords become `| Am7 G7 . . |`. Without a time signature, no dots are added.
+
+### Plain text (`-f txt`)
+Outputs a clean, readable `.txt` file with standard ASCII notation: `|`, `|:`, `:|`, `||` barlines, `(1)` / `(2)` ending numbers, annotations as bare text. Fully editable in any text editor. Page breaks (`===`) become blank lines.
+
 ### HTML (`-f html`)
-The default output. Opens in any browser. The CSS is embedded directly in the file, so it is fully self-contained — no external stylesheets needed. This is the best format for previewing and iterating on your layout, since you can edit the CSS block inside `chord_tool.py` and re-run to see changes immediately.
+Self-contained `.html` file that opens in any browser with no external stylesheets needed. Best for previewing and tweaking the layout. The CSS lives in `chord_tool.py` as the `CSS` variable — edit it there and re-run to update all output.
 
 ### PDF (`-f pdf`)
-Rendered from the same HTML via WeasyPrint. What you see in the browser is what you get in the PDF. Page breaks (`===` in the source) are honoured. Requires WeasyPrint and its system dependencies to be installed.
-
-### ChordPro (`-f cho`)
-Outputs a `.cho` file compatible with Songbook Pro and other ChordPro readers. Chord symbols are wrapped in brackets (`[Am7]`). Annotations are rendered as comments (`# text`). Page breaks have no equivalent and are silently skipped.
+Rendered from the same HTML via WeasyPrint. What you see in the browser is what you get in the PDF. Page breaks (`===`) are honoured. Requires WeasyPrint and its system dependencies.
 
 ---
 
@@ -98,7 +105,7 @@ Source files are plain `.txt` files. A file can contain one or more songs.
 
 ### Song structure
 
-Each song is wrapped in a metadata block delimited by `---`. The metadata block is optional for single-song files but required when a file contains multiple songs.
+Each song is optionally wrapped in a metadata block delimited by `---`. The metadata block is optional for single-song files but required when a file contains multiple songs.
 
 ```
 ---
@@ -125,7 +132,7 @@ key: G
 D , G , D ;
 ```
 
-**Supported metadata fields:** `title`, `artist`, `key`, `time`. Any additional fields you add (e.g. `capo: 2`) will also be displayed.
+**Supported metadata fields:** `title`, `artist`, `key`, `time`. Any additional fields you add (e.g. `capo: 2`) will also be displayed in HTML/PDF output and passed through as directives in ChordPro.
 
 ---
 
@@ -135,12 +142,12 @@ D , G , D ;
 
 | Source | Rendered | Meaning |
 |--------|----------|---------|
-| `,` | `\|` | Plain barline |
-| `,:` | `\|:` | Repeat open (ritornello start) |
-| `:,` | `:\|` | Repeat close (ritornello end) |
-| `;` | `\|\|` | Final double barline (end of piece/section) |
+| `,` | `|` | Plain barline |
+| `,:` | `|:` | Repeat open (ritornello start) |
+| `:,` | `:|` | Repeat close (ritornello end) |
+| `;` | `||` | Final double barline (end of piece/section) |
 
-Each comma (or decorated comma) separates one measure from the next. Everything between two barlines is one measure, and a measure will never be split across a line when wrapping.
+Each comma (or decorated comma) separates one measure from the next. Everything between two barlines is one measure, and a measure will never be split across a line when wrapping in HTML/PDF.
 
 **Example:**
 ```
@@ -162,7 +169,7 @@ Write the ending number in square brackets immediately after the barline comma, 
 ,[2]    ->  second ending
 ```
 
-The brackets are converted to a small black box with white text in the rendered output.
+In HTML/PDF the number is rendered as white text on a black box. In ChordPro and plain text it appears as `(1)` / `(2)`.
 
 **Example:**
 ```
@@ -173,12 +180,13 @@ A , Bm E7 ,[1] A , E7 :,[2] A ;
 
 ### Two chords in one measure
 
-Simply put both chords separated by a space inside the measure:
+Put both chords separated by a space inside the measure:
 
 ```
 D , D#o Am , G ;
 ```
-The `D#o Am` measure contains two chords implying a change on beat 3 (or however you choose to interpret it).
+
+The `D#o Am` measure contains two chords implying a change on beat 3. In ChordPro grid output with a time signature, the remaining beats are filled with dots: `| D#o Am . . |`.
 
 ---
 
@@ -192,6 +200,8 @@ A , E7 , A , E7 ;
 D , G , D , A7 ;
 ```
 
+In ChordPro output, a blank line closes the current grid block and opens a new one after the gap.
+
 ---
 
 ### Text annotations
@@ -204,7 +214,7 @@ Wrap any text in curly braces `{ }`. Annotations can appear on their own line or
 {repeat 3x}
 {Chorus}
 ```
-Renders as a block of italic text above or below the chord lines.
+In HTML/PDF renders as italic text. In ChordPro becomes `{comment: D.C. al Coda}`.
 
 **Inline (within a chord line):**
 ```
@@ -221,7 +231,7 @@ The annotation appears between the measures it sits between.
 
 ### Page break
 
-A line containing only `===` forces a new page in both HTML (print) and PDF output:
+A line containing only `===` forces a new page in HTML (print) and PDF:
 
 ```
 Am , E7 , Am ;
@@ -229,13 +239,13 @@ Am , E7 , Am ;
 D , G , D ;
 ```
 
-In a browser window, `===` is invisible. In print / PDF, everything after it starts on a new page.
+In a browser window `===` is invisible. In PDF everything after it starts on a new page. In ChordPro and plain text it becomes a blank line.
 
 ---
 
-## Styling
+## Styling (HTML and PDF)
 
-The CSS that controls the appearance of the HTML and PDF output is stored as the `CSS` variable near the top of the HTML rendering section in `chord_tool.py`. Edit it directly in the script — every time you run the interpreter the new styles will be applied.
+The CSS that controls HTML and PDF appearance is stored as the `CSS` variable in `chord_tool.py`. Edit it directly in the script — every time you run the interpreter the new styles are applied.
 
 Available CSS selectors:
 
@@ -250,9 +260,9 @@ Available CSS selectors:
 | `.spacer` | Blank-line gap between sections |
 | `.page-break` | Invisible div that triggers a page break |
 | `.measure` | One bar — the core layout unit |
-| `.measure.repeat-open` | A measure whose left barline is `\|:` |
-| `.measure.repeat-close` | A measure whose right barline is `:\|` |
-| `.measure.final` | A measure whose right barline is `\|\|` |
+| `.measure.repeat-open` | A measure whose left barline is `|:` |
+| `.measure.repeat-close` | A measure whose right barline is `:|` |
+| `.measure.final` | A measure whose right barline is `||` |
 | `.dots` | The `:` repeat dot character inside the barline |
 | `.ending` | Volta number (1, 2…) with black background |
 | `.chord` | Individual chord symbol |
@@ -288,3 +298,10 @@ key: Dm
 Dm , A7 ,: Dm , Gm , A7 :, Dm ;
 {D.C. al Fine}
 ```
+
+---
+
+## Roadmap
+
+### Auto-capitalisation of chord names
+Currently chord names in the source must be capitalised correctly (`Am7`, `D#o`). A planned improvement will auto-capitalise the root letter at interpret time, so `am7` and `d#o` in the source will produce `Am7` and `D#o` in the output — removing the need to reach for Shift when writing chord names.
