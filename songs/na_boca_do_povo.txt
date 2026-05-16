@@ -1,13 +1,12 @@
-INTRO: Dm  Gm  /  (A  C#) Dm  /  Dm  A7  / A7  Dm  /  
-              Dm  Gm  /  (A  C#) Dm  /  Dm  A7  / RIFF
 
-Gm  A7  /  Dm  /  A7  (G  A) /  Dm  F#m  /  Gm  A7  /  Dm  C  /  
-Bb  A7  / Dm  F#m  /  
+{c: Intro:}, : Gm, A7, Dm, %, A7, %, Dm , Dm :,
 
-nunca mais
-Gm  /  Dm  /  Gm  C  /  F  Dm  /  Gm  C  /  F  Dm  /  Gm  A  /  Dm
+Gm, A, Dm, %, A7, Gm A7, Dm , D7, Gm, A7, Dm, Dm/C, Bb7, A7, Dm, D7;
 
-depois do segundo refrao antes da intro: Gm  A7  /  Dm  /  A7  (G  A) /  
+,: Gm, %, Dm, D7, Gm, C7, F, D7, Gm, C7, F, Dm, Gm, A7,(1) Dm, D7 :,(2) Dm, %, 
 
+{c: D.C. al Fine}
 
-TERMINA EM C
+{c: Fine} | Gm | A7 | Dm | % | A7 | Gm A7 | 
+{c: Intro 1x e B e depois Intro} 
+

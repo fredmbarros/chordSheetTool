@@ -155,7 +155,7 @@ A , E7 ,: A , A7 , D D#o ,[1] A , Bm E7 :,[2] A E7 , A ;
 ```
 Renders as:
 ```
-| A | E7 |: A | A7 | D D#o |(1) A | Bm E7 :| (2) A E7 | A ||
+| A | E7 |: A | A7 | D D#o |(1) A | Bm E7 :|(2) A E7 | A ||
 ```
 
 ---

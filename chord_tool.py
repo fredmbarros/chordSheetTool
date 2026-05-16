@@ -20,9 +20,33 @@ except ImportError:
 #   [n] ending number            ->  digit only, black-box styled
 #   {text}                       ->  inline annotation, rendered as text
 #   ===  (own line)              ->  page break
+#   c-d-eb-e                     ->  single note run (hyphen-separated lowercase)
 
 def normalise_chords(raw):
     return ' '.join(raw.split())
+
+
+# Note run pattern: lowercase letters (with optional # or b) joined by hyphens
+# e.g. c-d-eb-e  or  g-a-b-c
+NOTE_RUN_PAT = re.compile(r"(?<![\w#])([a-g][b#]?(?:-[a-g][b#]?)+)(?![\w#])")
+
+def expand_note_runs(chords, fmt):
+    """
+    Expand hyphen-separated note runs in a chord string.
+    fmt='cho'  -> [c] [d] [eb] [e]   (lowercase brackets for ChordPro)
+    fmt='html' -> <span class="note">c</span> etc.
+    fmt='txt'  -> c d eb e           (plain, space-separated, lowercase)
+    fmt='raw'  -> c d eb e           (plain, for internal use)
+    """
+    def replace(m):
+        notes = m.group(1).split('-')
+        if fmt == 'cho':
+            return ' '.join('[' + n + ']' for n in notes)
+        elif fmt == 'html':
+            return ' '.join('<span class="note">' + n + '</span>' for n in notes)
+        else:  # txt or raw
+            return ' '.join(notes)
+    return NOTE_RUN_PAT.sub(replace, chords)
 
 
 def tokenise(line):
@@ -255,12 +279,13 @@ def generate_cho(content):
                         right = ''
 
                     ending = ('(' + t['ending'] + ') ' if t['ending'] else '')
+                    chords_str = expand_note_runs(t['chords'], 'cho')
                     chords_in_measure = len(t['chords'].split())
                     if beats and chords_in_measure < beats:
                         padding = ' ' + ' '.join(['.'] * (beats - chords_in_measure))
                     else:
                         padding = ''
-                    parts.append(f"{left} {ending}{t['chords']}{padding}{right}")
+                    parts.append(f"{left} {ending}{chords_str}{padding}{right}")
             if parts:
                 # Close the final measure if no explicit right barline
                 row = ' '.join(parts)
@@ -286,6 +311,8 @@ DOTS = '<span class="dots">:</span>'
 
 
 def chords_to_spans(text):
+    # Expand note runs first (before chord regex touches them)
+    text = expand_note_runs(text, 'html')
     return CHORD_PAT.sub(r'<span class="chord">\1</span>', text)
 
 
@@ -489,6 +516,12 @@ body {
   color: black;
 }
 
+/* ---- single note runs e.g. c-d-eb-e ---- */
+.note {
+  color: black;
+  font-style: italic;   /* visually distinguish notes from chords */
+}
+
 /* ---- text annotation {like this} ---- */
 div.annotation {
   font-family: Helvetica, Arial, sans-serif;
@@ -585,7 +618,7 @@ def generate_txt(content):
                     right  = (' :|' if t['right_deco'] == ':' else
                               (' ||' if t['right_deco'] == '||' else ''))
                     ending = ('(' + t['ending'] + ') ' if t['ending'] else '')
-                    chords = t['chords']
+                    chords = expand_note_runs(t['chords'], 'txt')
                     parts.append(f"{left} {ending}{chords}{right}" if not right
                                  else f"{left} {ending}{chords}{right}")
             lines_out.append(' '.join(parts))
@@ -659,6 +692,171 @@ def process_folder(folder_path, fmt):
 
 
 # ---------------------------------------------------------------------------
+# CHORD-OVER-LYRICS TO CHORDPRO CONVERTER
+# ---------------------------------------------------------------------------
+# Converts a traditional "chords above lyrics" text file into ChordPro format.
+#
+# Input format:
+#   A chord line is a line consisting only of chord symbols and whitespace.
+#   It is always immediately followed by its lyric line.
+#   A blank line or a non-chord line that isn't preceded by a chord line
+#   is passed through as-is (as a {comment:} or blank line).
+#
+# Algorithm:
+#   For each (chord_line, lyric_line) pair, read the column position of
+#   each chord token in the chord line, then insert [chord] at that
+#   character index in the lyric line (padding with spaces if needed).
+
+# This will be inserted into chord_tool.py replacing lines 710-805
+
+CHORD_TOKEN_PAT = re.compile(
+    r'([A-G][b#]?(m|maj|min|aug|dim|sus|o|ø|M)?\d?(\+|ø)?(/[A-G][b#]?)?)'
+)
+
+# Raw ChordPro directives: {anything}
+CHORDPRO_DIRECTIVE_PAT = re.compile(r'^\{[^}]+\}\s*$')
+
+# ChordPro grid rows: lines starting with |
+CHORDPRO_GRID_ROW_PAT = re.compile(r'^\s*\|')
+
+
+def is_chord_line(line):
+    """Return True if the line contains only chord symbols and whitespace."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if CHORDPRO_DIRECTIVE_PAT.match(stripped):
+        return False
+    if CHORDPRO_GRID_ROW_PAT.match(stripped):
+        return False
+    remainder = CHORD_TOKEN_PAT.sub('', stripped).strip()
+    return remainder == ''
+
+
+def merge_chords_into_lyric(chord_line, lyric_line):
+    """
+    Insert [chord] markers into lyric_line at the column positions
+    where each chord appears in chord_line.
+
+    Uses a slice-based approach: build the result by taking slices of
+    the original lyric between chord column positions, so earlier
+    insertions never shift the column indices of later chords.
+    """
+    chords_at = [(m.start(), m.group()) for m in CHORD_TOKEN_PAT.finditer(chord_line)]
+    if not chords_at:
+        return lyric_line
+
+    # Pad lyric to at least the length of the chord line
+    lyric = lyric_line.ljust(len(chord_line))
+
+    # Slice the lyric between chord positions — no offset accumulation
+    result = []
+    prev_col = 0
+    for col, chord in chords_at:
+        result.append(lyric[prev_col:col])
+        result.append('[' + chord + ']')
+        prev_col = col
+    result.append(lyric[prev_col:])
+
+    return ''.join(result).rstrip()
+
+
+def convert_chords_over_lyrics(content, title=None):
+    """
+    Convert a chord-over-lyrics text file to ChordPro format.
+
+    Handles:
+    - Optional --- metadata block
+    - Chord line + lyric line pairs -> merged ChordPro inline chords
+    - Lyrics-only lines -> plain text (no directive)
+    - Blank lines -> passed through
+    - Raw ChordPro directives {sog}, {eog}, {c:} etc -> verbatim passthrough
+    - ChordPro grid rows starting with | -> verbatim passthrough
+    - Instrumental chord line (followed by blank) -> {comment:}
+    """
+    lines_raw = content.splitlines()
+    meta = {}
+    start_line = 0
+
+    # Parse optional --- metadata block
+    if lines_raw and lines_raw[0].strip() == '---':
+        close = next((i for i in range(1, len(lines_raw))
+                      if lines_raw[i].strip() == '---'), None)
+        if close:
+            for line in lines_raw[1:close]:
+                if ':' in line:
+                    k, _, v = line.partition(':')
+                    meta[k.strip().lower()] = v.strip()
+            start_line = close + 1
+
+    lines = lines_raw[start_line:]
+    out = []
+
+    # Header directives
+    t = title or meta.get('title') or 'Untitled'
+    out.append('{title: ' + t + '}')
+    if meta.get('artist'): out.append('{artist: ' + meta['artist'] + '}')
+    if meta.get('key'):    out.append('{key: '    + meta['key']    + '}')
+    if meta.get('time'):   out.append('{time: '   + meta['time']   + '}')
+    out.append('')
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Blank line
+        if not stripped:
+            out.append('')
+            i += 1
+            continue
+
+        # Raw ChordPro directive -> verbatim
+        if CHORDPRO_DIRECTIVE_PAT.match(stripped):
+            out.append(stripped)
+            i += 1
+            continue
+
+        # ChordPro grid row -> verbatim
+        if CHORDPRO_GRID_ROW_PAT.match(stripped):
+            out.append(stripped)
+            i += 1
+            continue
+
+        # Chord line
+        if is_chord_line(line):
+            next_line = lines[i + 1] if i + 1 < len(lines) else ''
+            next_stripped = next_line.strip()
+
+            # Followed by a lyric line -> merge
+            if (next_stripped
+                    and not is_chord_line(next_line)
+                    and not CHORDPRO_DIRECTIVE_PAT.match(next_stripped)
+                    and not CHORDPRO_GRID_ROW_PAT.match(next_stripped)):
+                out.append(merge_chords_into_lyric(line, next_line))
+                i += 2
+                continue
+
+            # Followed by blank or end of file -> instrumental grid block
+            # one chord per measure, no time signature available here
+            chords_in_line = [m.group() for m in CHORD_TOKEN_PAT.finditer(stripped)]
+            if chords_in_line:
+                out.append('{start_of_grid}')
+                row = ' '.join('| ' + c for c in chords_in_line) + ' |'
+                out.append(row)
+                out.append('{end_of_grid}')
+            i += 1
+            continue
+
+        # Plain lyric line (no chord line above it) -> pass through as-is
+        out.append(stripped)
+        i += 1
+
+    return '\n'.join(out)
+
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -673,7 +871,24 @@ def main():
                         help='Output filename (single-file mode only)')
     parser.add_argument('-b', '--batch', action='store_true',
                         help='Batch-convert all .txt files in the given folder')
+    parser.add_argument('--convert', action='store_true',
+                        help='Convert chord-over-lyrics file to ChordPro format')
+    parser.add_argument('--title', help='Song title for --convert mode')
     args = parser.parse_args()
+
+    if args.convert:
+        if not os.path.isfile(args.input):
+            print(f"Error: '{args.input}' not found.")
+            return
+        with open(args.input, 'r') as fh:
+            content = fh.read()
+        title = args.title or os.path.splitext(os.path.basename(args.input))[0]
+        result = convert_chords_over_lyrics(content, title)
+        out = args.output or (args.input.rsplit('.', 1)[0] + '.cho')
+        with open(out, 'w') as fh:
+            fh.write(result)
+        print(f"Created {out}")
+        return
 
     if args.batch:
         if not os.path.isdir(args.input):
