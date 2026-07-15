@@ -190,13 +190,14 @@ def parse_meta(meta_body):
 # chord-only sheets. Each run of chord lines becomes a grid block.
 # Annotations become {comment: } directives.
 
-def generate_cho(content):
+def generate_cho(content, out_dir=None):
     songs = split_songs(content)
     output_parts = []
 
     for meta_body, chord_text in songs:
         meta = parse_meta(meta_body)
         title = meta.get('title', 'Chord Sheet')
+        song_key = meta.get('key')
         lines_out = ['{title: ' + title + '}']
 
         if meta.get('artist'):
@@ -233,6 +234,24 @@ def generate_cho(content):
             if stripped == '===':
                 flush_grid(grid_buf, lines_out)
                 lines_out.append('')
+                continue
+
+            nm = NOTATION_LINE_PAT.match(stripped)
+            if nm:
+                flush_grid(grid_buf, lines_out)
+                if NOTATION_DISABLED:
+                    lines_out.append('{comment: ' + nm.group(1) + '}')
+                else:
+                    rr = render_notation(nm.group(1), song_key, out_dir or '.')
+                    if rr.get('error'):
+                        print("Warning: notation snippet failed (" +
+                              (title or 'song') + "): " + rr['error'])
+                        lines_out.append('{comment: notation: ' + nm.group(1) + '}')
+                    else:
+                        label = rr.get('id') or rr.get('hash') or 'notation'
+                        lines_out.append('{comment: \u266a ' + label + '}')
+                        if rr.get('png_rel'):
+                            lines_out.append('{image: ' + rr['png_rel'] + '}')
                 continue
 
             tokens = tokenise(line)
@@ -349,7 +368,7 @@ def line_to_html(tokens):
     return '<div class="section">' + inner + '</div>'
 
 
-def song_to_html(meta, chord_text):
+def song_to_html(meta, chord_text, out_dir=None):
     html = '<div class="song">\n'
 
     if meta.get('title'):
@@ -375,12 +394,26 @@ def song_to_html(meta, chord_text):
                  + ' &nbsp; '.join(meta_fields)
                  + '</div>\n')
 
+    song_key = meta.get('key')
+
     for line in chord_text.splitlines():
         if not line.strip():
             html += '<div class="spacer"></div>\n'
             continue
         if line.strip() == '===':
             html += '<div class="page-break"></div>\n'
+            continue
+        # Notation directive on its own line
+        nm = NOTATION_LINE_PAT.match(line.strip())
+        if nm:
+            if NOTATION_DISABLED:
+                html += '<div class="annotation">' + nm.group(1) + '</div>\n'
+            else:
+                rr = render_notation(nm.group(1), song_key, out_dir or '.')
+                if rr.get('error'):
+                    print("Warning: notation snippet failed (" +
+                          (meta.get('title') or 'song') + "): " + rr['error'])
+                html += notation_to_html(rr) + '\n'
             continue
         tokens = tokenise(line)
         html += line_to_html(tokens) + '\n'
@@ -539,15 +572,33 @@ span.annotation {
   position: relative;
   top: 3pt;
 }
+
+/* ---- notation snippet (rendered score image) ---- */
+.notation {
+  margin: 0.5em 0;
+}
+
+.notation-img {
+  max-width: 100%;
+  height: auto;
+}
+
+.notation-ascii {
+  font-family: 'Courier New', monospace;
+  font-size: 11pt;
+  background: #f4f4f4;
+  padding: 4pt 6pt;
+  white-space: pre-wrap;
+}
 """
 
 
-def generate_html(content, standalone=True):
+def generate_html(content, standalone=True, out_dir=None):
     songs = split_songs(content)
     fragments = []
     for meta_body, chord_text in songs:
         meta = parse_meta(meta_body)
-        fragments.append(song_to_html(meta, chord_text))
+        fragments.append(song_to_html(meta, chord_text, out_dir=out_dir))
 
     body = '\n'.join(fragments)
 
@@ -578,7 +629,7 @@ def generate_html(content, standalone=True):
 # Plain ASCII render - same logic as the tokeniser but outputs pipe characters
 # and standard notation instead of HTML. Fully editable in any text editor.
 
-def generate_txt(content):
+def generate_txt(content, out_dir=None):
     songs = split_songs(content)
     output_parts = []
 
@@ -608,6 +659,10 @@ def generate_txt(content):
             if line.strip() == '===':
                 lines_out.append('')   # page break has no plain-text equivalent
                 continue
+            if NOTATION_LINE_PAT.match(line.strip()):
+                # Plain text preserves the source directive verbatim
+                lines_out.append(line.strip())
+                continue
             tokens = tokenise(line)
             parts = []
             for t in tokens:
@@ -631,11 +686,11 @@ def generate_txt(content):
 # PDF OUTPUT
 # ---------------------------------------------------------------------------
 
-def generate_pdf(content, output_path):
+def generate_pdf(content, output_path, out_dir=None):
     if not PDF_SUPPORT:
         print("Error: weasyprint not available.")
         return
-    html = generate_html(content, standalone=True)
+    html = generate_html(content, standalone=True, out_dir=out_dir)
     WeasyprintHTML(string=html).write_pdf(output_path)
 
 
@@ -648,21 +703,22 @@ def process_file(input_path, fmt, output_path=None):
         content = fh.read()
 
     out = output_path or (input_path.rsplit('.', 1)[0] + '.' + fmt)
+    out_dir = os.path.dirname(os.path.abspath(out))
 
     if fmt == 'txt':
-        result = generate_txt(content)
+        result = generate_txt(content, out_dir=out_dir)
         with open(out, 'w') as fh:
             fh.write(result)
     elif fmt == 'cho':
-        result = generate_cho(content)
+        result = generate_cho(content, out_dir=out_dir)
         with open(out, 'w') as fh:
             fh.write(result)
     elif fmt == 'html':
-        result = generate_html(content, standalone=True)
+        result = generate_html(content, standalone=True, out_dir=out_dir)
         with open(out, 'w') as fh:
             fh.write(result)
     elif fmt == 'pdf':
-        generate_pdf(content, out)
+        generate_pdf(content, out, out_dir=out_dir)
 
     print(f"Created {out}")
 
@@ -856,13 +912,571 @@ def convert_chords_over_lyrics(content, title=None):
 
 
 
+
+
+# ===========================================================================
+# ASCII NOTATION -> LILYPOND  (inlined from ascii_notation.py)
+# ===========================================================================
+
+
+
+
+NOTE_PAT = re.compile(
+    r"""
+    ^
+    (?P<letter>[a-g])
+    (?P<accidental>(?:\#|b)*)
+    (?P<oct_up>'*)
+    (?P<oct_down>,*)
+    (?P<duration>\d*)
+    $
+    """,
+    re.VERBOSE,
+)
+
+REST_PAT = re.compile(r"^x(?P<duration>\d*)$")
+
+ACCIDENTAL_MAP = {
+    "":   "",
+    "#":  "is",
+    "##": "isis",
+    "b":  "es",
+    "bb": "eses",
+}
+
+CLEF_MIDDLE_OCTAVE = {
+    "treble": 4,
+    "bass": 3,
+}
+
+_KEY_ROOT_PAT = re.compile(r"^([A-Ga-g])([#b]*)(m)?$")
+
+
+def chord_key_to_lilypond(key_str):
+    if not key_str:
+        return None
+    m = _KEY_ROOT_PAT.match(key_str)
+    if not m:
+        raise ValueError(f"Cannot parse key: {key_str!r}")
+    letter, accidental, minor = m.group(1), m.group(2), m.group(3)
+    if accidental not in ACCIDENTAL_MAP:
+        raise ValueError(f"Unsupported accidental in key: {accidental!r}")
+    root = letter.lower() + ACCIDENTAL_MAP[accidental]
+    mode = "\\minor" if minor else "\\major"
+    return f"{root} {mode}"
+
+
+def validate_time_signature(time_str):
+    if not time_str:
+        return None
+    if not re.match(r"^\d+/\d+$", time_str):
+        raise ValueError(f"Time signature must be N/M, got {time_str!r}")
+    return time_str
+
+
+def _ascii_pitch_to_lilypond(letter, accidental, octave_shift, clef):
+    if accidental not in ACCIDENTAL_MAP:
+        raise ValueError(f"Unsupported accidental: {accidental!r}")
+    suffix = ACCIDENTAL_MAP[accidental]
+    middle_octave = CLEF_MIDDLE_OCTAVE[clef] + octave_shift
+    n_marks = middle_octave - 3
+    if n_marks > 0:
+        marks = "'" * n_marks
+    elif n_marks < 0:
+        marks = "," * (-n_marks)
+    else:
+        marks = ""
+    return f"{letter}{suffix}{marks}"
+
+
+class ParseError(Exception):
+    pass
+
+
+def parse_options(line):
+    options = {}
+    tokens = line.split()
+    i = 0
+    while i < len(tokens) and "=" in tokens[i] and tokens[i].count("=") == 1:
+        key, val = tokens[i].split("=", 1)
+        if re.match(r"^[a-z_]+$", key):
+            options[key] = val
+            i += 1
+        else:
+            break
+    return options, " ".join(tokens[i:])
+
+
+def convert_notation_line(notation, default_clef="treble"):
+    options, body = parse_options(notation)
+    clef = options.get("clef", default_clef)
+    if clef not in CLEF_MIDDLE_OCTAVE:
+        raise ParseError(f"Unknown clef: {clef!r}. Use 'treble' or 'bass'.")
+
+    key = options.get("key")
+    if key:
+        try:
+            chord_key_to_lilypond(key)
+        except ValueError as e:
+            raise ParseError(str(e))
+
+    time_sig = options.get("time")
+    if time_sig:
+        try:
+            validate_time_signature(time_sig)
+        except ValueError as e:
+            raise ParseError(str(e))
+
+    tokens = body.split()
+    if not tokens:
+        return "", {"clef": clef, "key": key, "time": time_sig}
+
+    out = []
+    current_duration = None
+
+    for tok in tokens:
+        if tok == "|":
+            out.append("|")
+            continue
+        if tok == "(":
+            out.append("__SLUR_OPEN__")
+            continue
+        if tok == ")":
+            out.append("__SLUR_CLOSE__")
+            continue
+        if tok == "[":
+            out.append("__BEAM_OPEN__")
+            continue
+        if tok == "]":
+            out.append("__BEAM_CLOSE__")
+            continue
+
+        prefix_slur = ""
+        suffix_slur = ""
+        prefix_beam = ""
+        suffix_beam = ""
+        while tok and tok[0] in "([":
+            if tok[0] == "(":
+                prefix_slur = "("
+            else:
+                prefix_beam = "["
+            tok = tok[1:]
+        while tok and tok[-1] in ")]":
+            if tok[-1] == ")":
+                suffix_slur = ")"
+            else:
+                suffix_beam = "]"
+            tok = tok[:-1]
+
+        rest_match = REST_PAT.match(tok)
+        if rest_match:
+            dur = rest_match.group("duration")
+            if dur:
+                current_duration = dur
+            if current_duration is None:
+                raise ParseError(
+                    f"Rest '{tok}' has no duration and no prior duration to inherit."
+                )
+            lily_tok = f"r{current_duration}"
+            if prefix_slur:
+                out.append("__SLUR_OPEN__")
+            if prefix_beam:
+                out.append("__BEAM_OPEN__")
+            out.append(lily_tok)
+            if suffix_slur:
+                out.append("__SLUR_CLOSE__")
+            if suffix_beam:
+                out.append("__BEAM_CLOSE__")
+            continue
+
+        note_match = NOTE_PAT.match(tok)
+        if not note_match:
+            raise ParseError(
+                f"Cannot parse token: {tok!r}. "
+                f"Expected format: letter, optional accidentals (# or b), "
+                f"optional octave mark (' for up, , for down), optional duration."
+            )
+
+        letter = note_match.group("letter")
+        accidental = note_match.group("accidental")
+        oct_up = note_match.group("oct_up")
+        oct_down = note_match.group("oct_down")
+        duration = note_match.group("duration")
+
+        if oct_up and oct_down:
+            raise ParseError(f"Note has both octave-up and octave-down marks: {tok!r}")
+        if len(oct_up) > 1 or len(oct_down) > 1:
+            raise ParseError(
+                f"Only three octaves supported; got {tok!r}. Use a single ' or , mark."
+            )
+
+        octave_shift = 0
+        if oct_up:
+            octave_shift = +1
+        elif oct_down:
+            octave_shift = -1
+
+        if duration:
+            current_duration = duration
+        if current_duration is None:
+            raise ParseError(
+                f"First note '{tok}' must declare a duration (e.g. '{tok}8')."
+            )
+
+        pitch = _ascii_pitch_to_lilypond(letter, accidental, octave_shift, clef)
+        lily_tok = f"{pitch}{current_duration}"
+
+        if prefix_slur:
+            out.append("__SLUR_OPEN__")
+        if prefix_beam:
+            out.append("__BEAM_OPEN__")
+        out.append(lily_tok)
+        if suffix_slur:
+            out.append("__SLUR_CLOSE__")
+        if suffix_beam:
+            out.append("__BEAM_CLOSE__")
+
+    resolved = []
+    in_manual_beam = []
+    pending_slur_open = False
+    pending_beam_open = False
+    manual_beam_depth = 0
+
+    def _attach_suffix(suffix):
+        for i in range(len(resolved) - 1, -1, -1):
+            if resolved[i] != "|":
+                resolved[i] = resolved[i] + suffix
+                return
+
+    for item in out:
+        if item == "__SLUR_OPEN__":
+            pending_slur_open = True
+            continue
+        if item == "__SLUR_CLOSE__":
+            _attach_suffix(")")
+            continue
+        if item == "__BEAM_OPEN__":
+            pending_beam_open = True
+            manual_beam_depth += 1
+            continue
+        if item == "__BEAM_CLOSE__":
+            _attach_suffix("]")
+            if manual_beam_depth > 0:
+                manual_beam_depth -= 1
+            continue
+
+        if item == "|":
+            resolved.append(item)
+            in_manual_beam.append(False)
+            continue
+
+        token_str = item
+        if pending_slur_open:
+            token_str = token_str + "("
+            pending_slur_open = False
+        if pending_beam_open:
+            token_str = token_str + "["
+            pending_beam_open = False
+        resolved.append(token_str)
+        in_manual_beam.append(manual_beam_depth > 0)
+
+    resolved = _auto_beam(resolved, in_manual_beam)
+
+    return " ".join(resolved), {"clef": clef, "key": key, "time": time_sig}
+
+
+def _token_duration(tok):
+    core = tok.rstrip("()[]")
+    m = re.search(r"(\d+)$", core)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def _is_rest(tok):
+    core = tok.lstrip("([")
+    return core.startswith("r")
+
+
+def _auto_beam(tokens, in_manual_beam):
+    n = len(tokens)
+    eligible = [False] * n
+    for i, tok in enumerate(tokens):
+        if tok == "|":
+            continue
+        if in_manual_beam[i]:
+            continue
+        if _is_rest(tok):
+            continue
+        dur = _token_duration(tok)
+        if dur is None:
+            continue
+        if dur >= 8:
+            eligible[i] = True
+
+    out = list(tokens)
+    i = 0
+    while i < n:
+        if not eligible[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and eligible[j + 1]:
+            j += 1
+        run_len = j - i + 1
+        if run_len >= 2:
+            out[i] = out[i] + "["
+            out[j] = out[j] + "]"
+        i = j + 1
+    return out
+
+
+def build_lilypond_snippet(notation, default_clef="treble", version="2.24.0"):
+    music, opts = convert_notation_line(notation, default_clef=default_clef)
+    clef = opts["clef"]
+    key = opts["key"]
+    time_sig = opts["time"]
+
+    staff_lines = [f'    \\clef "{clef}"']
+    if key:
+        staff_lines.append(f"    \\key {chord_key_to_lilypond(key)}")
+    if time_sig:
+        staff_lines.append(f"    \\time {time_sig}")
+        staff_lines.append(f"    {music}")
+    else:
+        cadenza_music = music.replace("|", '\\bar "|"')
+        staff_lines.append("    \\omit Staff.TimeSignature")
+        staff_lines.append("    \\cadenzaOn")
+        staff_lines.append(f"    {cadenza_music}")
+
+    staff_block = "\n".join(staff_lines)
+
+    return f"""\\version "{version}"
+
+\\header {{
+  tagline = ##f
+}}
+
+\\paper {{
+  indent = 0
+  line-width = 180\\mm
+  oddHeaderMarkup = ##f
+  evenHeaderMarkup = ##f
+  oddFooterMarkup = ##f
+  evenFooterMarkup = ##f
+}}
+
+\\score {{
+  \\new Staff {{
+{staff_block}
+  }}
+  \\layout {{ }}
+}}
+"""
+
+
+# ===========================================================================
+# NOTATION INTEGRATION  (ascii_notation -> LilyPond -> PNG)
+# ===========================================================================
+# A {notation: ...} directive on its own line in the chord text is rendered
+# to a cropped music image via LilyPond and embedded in the output.
+#
+# Source syntax (always single line, single voice):
+#     {notation: <inline options> <ascii body>}
+#   inline options use ascii_notation's key=value convention:
+#     clef=bass   time=3/4   key=Em   id=A
+#   id= is integration-specific: a short label used in .cho filenames/labels.
+#
+# Key inheritance: if the directive has no key= option, the song's {key:}
+# metadata is used; if neither, C major (no key signature).
+#
+# Per-format behavior:
+#   txt  -> directive line passes through verbatim
+#   cho  -> .ly + .png saved as sibling files; {comment:}+{image:} emitted
+#   html -> PNG embedded as base64 data URI inside <img class="notation">
+#   pdf  -> same HTML, so the embedded image carries through WeasyPrint
+#
+# LilyPond is invoked as a subprocess with -dcrop --png. If it is not on
+# PATH, one warning is printed per run and snippets fall back to .ly-only
+# (cho) or an ASCII <pre> block (html/pdf). A malformed snippet is caught,
+# warned about, and falls back the same way without aborting the run.
+#
+# Rendered files are cached by content hash so identical snippets render once.
+
+import hashlib
+import shutil
+import subprocess
+import base64
+
+# Module-level flags so warnings print only once per run.
+_LILYPOND_CHECKED = False
+_LILYPOND_PATH = None
+_LILYPOND_WARNED = False
+# Global switch set by the CLI (--no-notation).
+NOTATION_DISABLED = False
+
+NOTATION_LINE_PAT = re.compile(r'^\{\s*notation:\s*(.*?)\s*\}$', re.IGNORECASE)
+
+
+def _lilypond_available():
+    """Locate lilypond once; cache the result for the whole run."""
+    global _LILYPOND_CHECKED, _LILYPOND_PATH
+    if not _LILYPOND_CHECKED:
+        _LILYPOND_PATH = shutil.which('lilypond')
+        _LILYPOND_CHECKED = True
+    return _LILYPOND_PATH is not None
+
+
+def _warn_no_lilypond():
+    global _LILYPOND_WARNED
+    if not _LILYPOND_WARNED:
+        print("Warning: lilypond not found on PATH; notation snippets will be "
+              "saved as .ly files only. Render them manually in Frescobaldi, "
+              "or install lilypond to embed images automatically.")
+        _LILYPOND_WARNED = True
+
+
+def parse_notation_directive(body, song_key=None):
+    """
+    Split a {notation: ...} body into (id, ascii_for_converter).
+
+    - Pulls out an id= option (integration-specific, not passed to the
+      converter).
+    - If the body has no key= option and song_key is given, injects
+      key=<song_key> so the snippet inherits the song's key.
+    Returns (snippet_id, converter_input_string).
+    """
+    tokens = body.split()
+    snippet_id = None
+    has_key = False
+    kept = []
+    for tok in tokens:
+        if tok.startswith('id=') and tok.count('=') == 1:
+            snippet_id = tok.split('=', 1)[1]
+            continue
+        if tok.startswith('key=') and tok.count('=') == 1:
+            has_key = True
+        kept.append(tok)
+
+    converter_input = ' '.join(kept)
+    if not has_key and song_key:
+        converter_input = f'key={song_key} ' + converter_input
+    return snippet_id, converter_input
+
+
+def _notation_hash(converter_input):
+    return hashlib.sha1(converter_input.encode('utf-8')).hexdigest()[:12]
+
+
+def render_notation(body, song_key, out_dir):
+    """
+    Resolve one {notation:} directive into rendered artifacts.
+
+    Writes .ly (always, when possible) and .png (if lilypond present) into
+    NotationLY/ and NotationPNG/ subfolders of out_dir, keyed by content
+    hash. Uses the cache if the .png already exists.
+
+    Returns a dict describing the result:
+      { 'ok': bool,
+        'id': str|None,
+        'hash': str,
+        'ly_path': str|None,       # absolute path, may be None on parse error
+        'png_path': str|None,      # absolute path if rendered, else None
+        'png_rel': str|None,       # path relative to out_dir for {image:}
+        'ascii': str,              # original body (for fallback display)
+        'error': str|None }
+    """
+    snippet_id, converter_input = parse_notation_directive(body, song_key)
+    result = {
+        'ok': False, 'id': snippet_id, 'hash': None,
+        'ly_path': None, 'png_path': None, 'png_rel': None,
+        'ascii': body, 'error': None,
+    }
+
+    # Convert ASCII -> LilyPond source.
+    try:
+        ly_source = build_lilypond_snippet(converter_input)
+    except Exception as e:   # ParseError or anything unexpected
+        result['error'] = str(e)
+        return result
+
+    h = _notation_hash(converter_input)
+    result['hash'] = h
+    base = (snippet_id + '-' + h) if snippet_id else h
+
+    ly_dir = os.path.join(out_dir, 'NotationLY')
+    png_dir = os.path.join(out_dir, 'NotationPNG')
+    ly_path = os.path.join(ly_dir, base + '.ly')
+    png_path = os.path.join(png_dir, base + '.png')
+
+    # Cache hit: png already rendered.
+    if os.path.exists(png_path):
+        result.update(ok=True, ly_path=ly_path, png_path=png_path,
+                      png_rel=os.path.join('NotationPNG', base + '.png'))
+        return result
+
+    # Write the .ly file (always useful, even without lilypond).
+    os.makedirs(ly_dir, exist_ok=True)
+    with open(ly_path, 'w') as fh:
+        fh.write(ly_source)
+    result['ly_path'] = ly_path
+
+    if not _lilypond_available():
+        _warn_no_lilypond()
+        result['ok'] = True   # .ly written; caller falls back for image
+        return result
+
+    # Render the PNG via lilypond -dcrop --png.
+    os.makedirs(png_dir, exist_ok=True)
+    out_base = os.path.join(png_dir, base)
+    try:
+        proc = subprocess.run(
+            [_LILYPOND_PATH, '-dcrop', '--png', '-dresolution=200',
+             '-o', out_base, ly_path],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception as e:
+        result['error'] = f"lilypond invocation failed: {e}"
+        return result
+
+    # lilypond -dcrop writes <out_base>.cropped.png
+    cropped = out_base + '.cropped.png'
+    if os.path.exists(cropped):
+        os.replace(cropped, png_path)
+    if os.path.exists(png_path):
+        result.update(ok=True, png_path=png_path,
+                      png_rel=os.path.join('NotationPNG', base + '.png'))
+    else:
+        result['error'] = (proc.stderr or 'lilypond produced no output').strip()[:300]
+    return result
+
+
+def notation_to_html(render_result):
+    """Render a notation result as an HTML fragment (base64-embedded image)."""
+    if render_result.get('png_path') and os.path.exists(render_result['png_path']):
+        with open(render_result['png_path'], 'rb') as fh:
+            b64 = base64.b64encode(fh.read()).decode('ascii')
+        return ('<div class="notation">'
+                '<img class="notation-img" alt="notation" '
+                'src="data:image/png;base64,' + b64 + '"></div>')
+    # Fallback: show the ASCII source in a <pre>.
+    note = ''
+    if render_result.get('error'):
+        note = ' (notation error: ' + render_result['error'] + ')'
+    elif not _lilypond_available():
+        note = ' (install lilypond to render)'
+    return ('<div class="notation"><pre class="notation-ascii">'
+            + render_result.get('ascii', '') + note + '</pre></div>')
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Convert chord shorthand (.txt) to .txt / .cho / .html / .pdf')
+        description='Convert a chord-over-lyrics sheet (default) or chord '
+                    'shorthand (--chordsheet) to .cho / .txt / .html / .pdf')
     parser.add_argument('input',
                         help='Source .txt file, or folder path with --batch')
     parser.add_argument('-f', '--format', choices=['cho', 'html', 'pdf', 'txt'],
@@ -871,12 +1485,49 @@ def main():
                         help='Output filename (single-file mode only)')
     parser.add_argument('-b', '--batch', action='store_true',
                         help='Batch-convert all .txt files in the given folder')
+    parser.add_argument('--chordsheet', action='store_true',
+                        help='Treat input as chord shorthand (comma-barline '
+                             'notation) instead of a chord-over-lyrics sheet')
+    # --convert kept as a hidden no-op alias for backwards compatibility:
+    # chord-over-lyrics conversion is now the default behaviour.
     parser.add_argument('--convert', action='store_true',
-                        help='Convert chord-over-lyrics file to ChordPro format')
-    parser.add_argument('--title', help='Song title for --convert mode')
+                        help=argparse.SUPPRESS)
+    parser.add_argument('--title', help='Song title for chord-over-lyrics mode')
+    parser.add_argument('--no-notation', action='store_true',
+                        help='Skip LilyPond rendering; treat {notation:} as a comment')
     args = parser.parse_args()
 
-    if args.convert:
+    global NOTATION_DISABLED
+    if args.no_notation:
+        NOTATION_DISABLED = True
+
+    # Default mode: chord-over-lyrics conversion (unless --chordsheet given).
+    lyrics_mode = not args.chordsheet
+
+    if lyrics_mode and args.batch:
+        if not os.path.isdir(args.input):
+            print(f"Error: '{args.input}' is not a directory.")
+            return
+        out_dir = os.path.join(args.input, 'CHOs')
+        os.makedirs(out_dir, exist_ok=True)
+        txt_files = sorted(f for f in os.listdir(args.input) if f.lower().endswith('.txt'))
+        if not txt_files:
+            print(f"No .txt files found in {args.input}")
+            return
+        for fname in txt_files:
+            input_path = os.path.join(args.input, fname)
+            with open(input_path, 'r') as fh:
+                content = fh.read()
+            title = args.title or os.path.splitext(fname)[0]
+            result = convert_chords_over_lyrics(content, title)
+            out_path = os.path.join(out_dir, os.path.splitext(fname)[0] + '.cho')
+            with open(out_path, 'w') as fh:
+                fh.write(result)
+            print(f"Created {out_path}")
+        print(f"\nDone. {len(txt_files)} file(s) written to {out_dir}/")
+        return
+
+    if lyrics_mode:
         if not os.path.isfile(args.input):
             print(f"Error: '{args.input}' not found.")
             return
@@ -890,6 +1541,7 @@ def main():
         print(f"Created {out}")
         return
 
+    # --chordsheet mode: original comma-barline shorthand pipeline.
     if args.batch:
         if not os.path.isdir(args.input):
             print(f"Error: '{args.input}' is not a directory.")

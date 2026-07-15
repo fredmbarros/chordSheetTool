@@ -1,6 +1,6 @@
 # chord_tool — Documentation
 
-A command-line interpreter that converts plain-text chord sheets into ChordPro, HTML, PDF, or plain text files.
+A command-line tool that converts chord-over-lyrics sheets (default) or compact chord shorthand (--chordsheet) into ChordPro, HTML, PDF, or plain text, with optional embedded musical notation snippets.
 
 ---
 
@@ -39,33 +39,50 @@ source /path/to/your/project/venv/bin/activate
 
 ---
 
+## Two input modes
+
+The tool reads two different kinds of source file:
+
+1. **Chord-over-lyrics sheet (default).** A normal lyrics sheet with chord
+   symbols sitting on the line above the words (the format you copy from
+   most song sites). This is the default mode — no flag needed. Output is
+   always ChordPro (`.cho`), with chords merged inline above the syllables.
+
+2. **Chord shorthand (`--chordsheet`).** The compact comma-barline notation
+   for authoring chord charts from scratch (`A , E7 ,: A ... ;`). Pass
+   `--chordsheet` to use this mode. Output respects `-f` (`.cho`, `.txt`,
+   `.html`, `.pdf`) and supports `{notation:}` snippets, page breaks, etc.
+
+The two formats are mutually incompatible (a comma means a barline in
+shorthand but a literal comma in lyrics), so the mode must be chosen
+explicitly via the presence or absence of `--chordsheet`.
+
 ## Usage
 
 ```
 python chord_tool.py <input> [options]
 ```
 
-### Single file
+### Chord-over-lyrics conversion (default)
 
 ```bash
-python chord_tool.py song.txt              # outputs song.cho (default)
-python chord_tool.py song.txt -f cho       # same as above, explicit
-python chord_tool.py song.txt -f txt       # outputs song.txt (plain ASCII)
-python chord_tool.py song.txt -f html      # outputs song.html
-python chord_tool.py song.txt -f pdf       # outputs song.pdf
-python chord_tool.py song.txt -f pdf -o MySong.pdf   # custom output filename
+python chord_tool.py song.txt                       # outputs song.cho
+python chord_tool.py song.txt --title "My Song"     # set the title
+python chord_tool.py /path/to/folder -b             # batch → CHOs/
 ```
 
-### Batch mode (entire folder)
+### Chord shorthand (`--chordsheet`)
 
 ```bash
-python chord_tool.py /path/to/folder -b           # all .txt files → CHOs/
-python chord_tool.py /path/to/folder -b -f txt    # all .txt files → TXTs/
-python chord_tool.py /path/to/folder -b -f html   # all .txt files → HTMLs/
-python chord_tool.py /path/to/folder -b -f pdf    # all .txt files → PDFs/
+python chord_tool.py song.txt --chordsheet              # outputs song.cho
+python chord_tool.py song.txt --chordsheet -f txt       # plain ASCII
+python chord_tool.py song.txt --chordsheet -f html      # HTML
+python chord_tool.py song.txt --chordsheet -f pdf       # PDF
+python chord_tool.py /path/to/folder --chordsheet -b -f pdf   # batch → PDFs/
 ```
 
-Output files are placed in a subfolder (`CHOs`, `TXTs`, `HTMLs`, or `PDFs`) inside the source folder. The subfolder is created automatically if it does not exist.
+In shorthand batch mode, output files are placed in a subfolder (`CHOs`,
+`TXTs`, `HTMLs`, or `PDFs`) inside the source folder, created automatically.
 
 ---
 
@@ -76,6 +93,9 @@ Output files are placed in a subfolder (`CHOs`, `TXTs`, `HTMLs`, or `PDFs`) insi
 | `-f` | `--format` | Output format: `cho`, `txt`, `html`, or `pdf`. Default: `cho` |
 | `-o` | `--output` | Custom output filename (single-file mode only) |
 | `-b` | `--batch`  | Batch mode: process all `.txt` files in the given folder |
+|  | `--chordsheet` | Treat input as chord **shorthand** (comma-barline notation) instead of a chord-over-lyrics sheet |
+|  | `--title` | Song title (chord-over-lyrics mode) |
+|  | `--no-notation` | Skip LilyPond rendering; treat `{notation:}` as a comment |
 
 ---
 
@@ -155,7 +175,7 @@ A , E7 ,: A , A7 , D D#o ,[1] A , Bm E7 :,[2] A E7 , A ;
 ```
 Renders as:
 ```
-| A | E7 |: A | A7 | D D#o |(1) A | Bm E7 :|(2) A E7 | A ||
+| A | E7 |: A | A7 | D D#o |(1) A | Bm E7 :| (2) A E7 | A ||
 ```
 
 ---
@@ -300,6 +320,78 @@ Dm , A7 ,: Dm , Gm , A7 :, Dm ;
 ```
 
 ---
+
+---
+
+## Musical notation snippets (`{notation:}`)
+
+You can embed short melodic phrases (e.g. medley transitions) directly in a
+chord sheet using a `{notation: ...}` directive on its own line. The phrase
+is written in a compact ASCII notation and rendered as an engraved music
+image via LilyPond.
+
+```
+Em , Am ,: B7 , Em :, Am , B7 ;
+{notation: x8 g f# e | d16 c b8 a4}
+Am , B7 , Em ;
+```
+
+### Requirements
+
+Notation rendering requires **LilyPond** on your `PATH`
+(`brew install lilypond` on macOS). If LilyPond is not installed, the tool
+does not fail — it saves a `.ly` file for each snippet (which you can render
+manually in Frescobaldi) and prints one warning per run.
+
+### Notation syntax (inside the directive)
+
+- Note letters `a`–`g`, lowercase. Capitals are reserved for chord symbols.
+- Accidentals follow the letter: `f#`, `bb`, `c##`.
+- Octave: bare letter = middle octave; trailing `'` = up an octave;
+  trailing `,` = down an octave (e.g. `e'`, `e`, `e,`).
+- Durations are numbers attached to a note (`4` quarter, `8` eighth,
+  `16` sixteenth, etc.). A duration is inherited by following notes until
+  changed. The first note must declare a duration.
+- `x` = rest.
+- `|` = bar line.
+- `(` ... `)` = slur.
+- `[` ... `]` = manual beam group. Otherwise, runs of eighths-or-shorter
+  are auto-beamed.
+
+### Inline options (at the start of the directive body)
+
+- `clef=bass` — bass clef (default `treble`).
+- `time=4/4` — print a time signature and use strict bar-checking. If
+  omitted, the snippet renders in cadenza mode (no time signature, bar lines
+  drawn exactly where you write `|`).
+- `key=Em` — override the key signature. If omitted, the snippet inherits
+  the song's `{key:}` / `key:` metadata. If neither is present, C major.
+- `id=A` — a short label used in ChordPro filenames/captions (optional).
+
+Example with options:
+
+```
+{notation: clef=bass key=Em e8 b, a, g, | e,4}
+```
+
+### Output behavior per format
+
+- **`.cho`** — the `.ly` and `.png` are saved in `NotationLY/` and
+  `NotationPNG/` folders next to the output; the directive becomes a
+  `{comment: ♪ <label>}` plus an `{image: NotationPNG/<file>.png}` line.
+- **`.html` / `.pdf`** — the rendered image is embedded directly in the
+  file as a base64 data URI, so the output stays fully self-contained.
+- **`.txt`** — the directive line passes through verbatim.
+
+Rendered snippets are cached by content hash, so an identical phrase reused
+across songs is only rendered once.
+
+### `--no-notation`
+
+Pass `--no-notation` to skip LilyPond entirely and treat every
+`{notation:}` directive as a plain comment. Useful for fast iteration on the
+chord grid.
+
 
 ## Roadmap
 
